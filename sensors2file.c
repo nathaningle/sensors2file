@@ -1,11 +1,17 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 #include <errno.h>
+#include <string.h>
 #include <sys/types.h>
 #include <sys/time.h>
+#include <sys/stat.h>
 #include <sys/sysctl.h>
 #include <sys/sensors.h>
 #include <assert.h>
+
+const char targetpath[] = "/var/node_exporter/hwsensors.prom";
+#define PATHBUFLEN 1024
 
 /* Seconds between reading sensors. */
 #define INTERVAL 15
@@ -61,6 +67,10 @@ main(void)
     struct timespec offset, now, nexttime, sleep_for, sleep_rem;
     int sleep_res;
 
+    char tmppath[PATHBUFLEN];
+    int tmpfd;
+    FILE *tmpfile;
+
     /*
      * Calculate the offset from time modulo INTERVAL.  We use this to consistently
      * update INTERVAL seconds apart, regardless of the time we started.
@@ -72,21 +82,49 @@ main(void)
     offset.tv_sec %= INTERVAL;
 
     while(1) {
+        /* Open the tempfile. */
+        strlcpy(tmppath, targetpath, PATHBUFLEN);
+        strlcat(tmppath, ".XXXXXXXX", PATHBUFLEN);
+        tmpfd = mkstemp(tmppath);
+        if (tmpfd == -1) {
+            perror(tmppath);
+            exit(EXIT_FAILURE);
+        }
+        tmpfile = fdopen(tmpfd, "w");
+        if (!tmpfile) {
+            perror(tmppath);
+            close(tmpfd);
+            unlink(tmppath);
+            exit(EXIT_FAILURE);
+        }
+
         for (int i = 0; i < NUM_MIBS; i++) {
             /* Determine the name of the sensor device (chip). */
             if (sysctl(mibs[i], 3, &snsrdev, &sdlen, NULL, 0) == -1) {
                 perror("sysctl(2) failed to provide sensor device data");
+                fclose(tmpfile);
+                unlink(tmppath);
                 exit(EXIT_FAILURE);
             }
             /* Determine the name and value of the sensor. */
             if (sysctl(mibs[i], 5, &snsr, &slen, NULL, 0) == -1) {
                 perror("sysctl(2) failed to provide sensor data");
+                fclose(tmpfile);
+                unlink(tmppath);
                 exit(EXIT_FAILURE);
             }
 
             /* Magic numbers lifted from /usr/src/sbin/sysctl/sysctl.c. */
-            printf("node_hwmon_temp_celsius{chip=\"%s\", sensor=\"%s%d\"} %.2f\n",
+            fprintf(tmpfile, "node_hwmon_temp_celsius{chip=\"%s\", sensor=\"%s%d\"} %.2f\n",
                     snsrdev.xname, sensor_type_s[snsr.type], snsr.numt, (snsr.value - 273150000) / 1000000.0);
+        }
+
+        /* Close and rename the tempfile. */
+        fclose(tmpfile);
+        chmod(tmppath, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+        if (rename(tmppath, targetpath) == -1) {
+            perror("rename(2)");
+            exit(EXIT_FAILURE);
         }
 
         /* Sleep until the start of the next interval. */
