@@ -98,6 +98,9 @@ main(void)
             exit(EXIT_FAILURE);
         }
 
+        /* Write type information. */
+        fprintf(tmpfile, "#TYPE node_hwmon_temp_celsius gauge\n");
+
         for (int i = 0; i < NUM_MIBS; i++) {
             /* Determine the name of the sensor device (chip). */
             if (sysctl(mibs[i], 3, &snsrdev, &sdlen, NULL, 0) == -1) {

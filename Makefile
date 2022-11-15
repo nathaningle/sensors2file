@@ -1,4 +1,4 @@
-CFLAGS = -O0 -std=c99 -pedantic -Wall -Wextra -Werror
+CFLAGS = -O2 -std=c99 -pedantic -Wall -Wextra -Werror
 
 all: sensors2file
 
