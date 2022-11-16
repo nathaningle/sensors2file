@@ -16,17 +16,6 @@ const char targetpath[] = "/var/node_exporter/hwsensors.prom";
 /* Seconds between reading sensors. */
 #define INTERVAL 15
 
-/* This is specific to your hardware; use `ktrace sysctl hw.sensors; kdump` to determine values. */
-#define NUM_MIBS 6
-const int mibs[NUM_MIBS][5] = {
-    {CTL_HW, HW_SENSORS, 0, 0, 0},
-    {CTL_HW, HW_SENSORS, 6, 0, 0},
-    {CTL_HW, HW_SENSORS, 7, 0, 0},
-    {CTL_HW, HW_SENSORS, 8, 0, 0},
-    {CTL_HW, HW_SENSORS, 9, 0, 0},
-    {CTL_HW, HW_SENSORS, 10, 0, 0}
-};
-
 /* Round a number modulo another, e.g. roundmod(12, 5) == 10. */
 time_t
 roundmod(time_t x, int mod)
@@ -56,14 +45,60 @@ timedelta(struct timespec *result, const struct timespec *a, const struct timesp
     return -1;
 }
 
+/* Walk the hardware sensor tree.  Write results to fp. */
 int
-main(void)
-{
+walk_hwsensors(FILE *fp) {
     struct sensordev snsrdev;
     size_t sdlen = sizeof(snsrdev);
     struct sensor snsr;
     size_t slen = sizeof(snsr);
 
+    int mib[5] = {CTL_HW, HW_SENSORS, 0, 0, 0};
+
+    /* Write type information. */
+    fprintf(fp, "#TYPE node_hwmon_temp_celsius gauge\n");
+
+    for (int i = 0; ; i++) {
+        mib[2] = i;
+
+        /* Determine the name of the sensor device (chip). */
+        if (sysctl(mib, 3, &snsrdev, &sdlen, NULL, 0) == -1) {
+            if (errno == ENXIO)
+                continue;
+            if (errno == ENOENT)
+                break;
+            perror("sysctl(2) failed to provide sensor device data");
+            return -1;
+        }
+        for (int j = 0; j < SENSOR_MAX_TYPES; j++) {
+            mib[3] = j;
+
+            for (int k = 0; k < snsrdev.maxnumt[j]; k++) {
+                mib[4] = k;
+
+                /* Determine the name and value of the sensor. */
+                if (sysctl(mib, 5, &snsr, &slen, NULL, 0) == -1) {
+                    if (errno == ENXIO || errno == ENOENT)
+                        continue;
+                    perror("sysctl(2) failed to provide sensor data");
+                    return -1;
+                }
+
+                if (snsr.type == SENSOR_TEMP && (snsr.flags & SENSOR_FINVALID) == 0) {
+                    /* Magic numbers lifted from /usr/src/sbin/sysctl/sysctl.c. */
+                    fprintf(fp, "node_hwmon_temp_celsius{chip=\"%s\", sensor=\"%s%d\"} %.2f\n",
+                            snsrdev.xname, sensor_type_s[snsr.type], snsr.numt, (snsr.value - 273150000) / 1000000.0);
+                }
+            }
+        }
+    }
+
+    return 0;
+}
+
+int
+main(void)
+{
     struct timespec offset, now, nexttime, sleep_for, sleep_rem;
     int sleep_res;
 
@@ -98,28 +133,11 @@ main(void)
             exit(EXIT_FAILURE);
         }
 
-        /* Write type information. */
-        fprintf(tmpfile, "#TYPE node_hwmon_temp_celsius gauge\n");
-
-        for (int i = 0; i < NUM_MIBS; i++) {
-            /* Determine the name of the sensor device (chip). */
-            if (sysctl(mibs[i], 3, &snsrdev, &sdlen, NULL, 0) == -1) {
-                perror("sysctl(2) failed to provide sensor device data");
-                fclose(tmpfile);
-                unlink(tmppath);
-                exit(EXIT_FAILURE);
-            }
-            /* Determine the name and value of the sensor. */
-            if (sysctl(mibs[i], 5, &snsr, &slen, NULL, 0) == -1) {
-                perror("sysctl(2) failed to provide sensor data");
-                fclose(tmpfile);
-                unlink(tmppath);
-                exit(EXIT_FAILURE);
-            }
-
-            /* Magic numbers lifted from /usr/src/sbin/sysctl/sysctl.c. */
-            fprintf(tmpfile, "node_hwmon_temp_celsius{chip=\"%s\", sensor=\"%s%d\"} %.2f\n",
-                    snsrdev.xname, sensor_type_s[snsr.type], snsr.numt, (snsr.value - 273150000) / 1000000.0);
+        /* Walk the hardware sensor tree. */
+        if (walk_hwsensors(tmpfile) != 0) {
+            fclose(tmpfile);
+            unlink(tmppath);
+            exit(EXIT_FAILURE);
         }
 
         /* Close and rename the tempfile. */
