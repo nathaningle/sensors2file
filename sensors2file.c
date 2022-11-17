@@ -10,11 +10,18 @@
 #include <sys/sensors.h>
 #include <assert.h>
 
+
+/*
+ * Path to destination file.  It should end in '.prom', and node_exporter's
+ * --collector.textfile.directory command-line argument should point to the
+ *  containing directory.
+ */
 const char targetpath[] = "/var/node_exporter/hwsensors.prom";
 #define PATHBUFLEN 1024
 
 /* Seconds between reading sensors. */
 #define INTERVAL 15
+
 
 /* Round a number modulo another, e.g. roundmod(12, 5) == 10. */
 time_t
@@ -23,7 +30,12 @@ roundmod(time_t x, int mod)
     return (x / mod) * mod;
 }
 
-/* Calculate the difference between two timespec structs.  Fail if a > b. */
+
+/*
+ * Calculate the difference between two timespec structs.  Fail if a > b.
+ *
+ * Return 0 on success or -1 on failure.
+ */
 int
 timedelta(struct timespec *result, const struct timespec *a, const struct timespec *b)
 {
@@ -41,11 +53,16 @@ timedelta(struct timespec *result, const struct timespec *a, const struct timesp
         }
     }
 
-    /* If we get here then a > bi, so fail. */
+    /* If we get here then a > b, so fail. */
     return -1;
 }
 
-/* Walk the hardware sensor tree.  Write results to fp. */
+/*
+ * Walk the hardware sensor tree.  Read temperature sensors, write results to
+ * FILE *fp.  See the HW_SENSORS section in sysctl(2).
+ *
+ * Return 0 on success or -1 on failure.
+ */
 int
 walk_hwsensors(FILE *fp) {
     struct sensordev snsrdev;
@@ -55,10 +72,13 @@ walk_hwsensors(FILE *fp) {
 
     int mib[5] = {CTL_HW, HW_SENSORS, 0, 0, 0};
 
+    int i, j, k;
+
     /* Write type information. */
     fprintf(fp, "#TYPE node_hwmon_temp_celsius gauge\n");
 
-    for (int i = 0; ; i++) {
+    for (i = 0; ; i++) {
+        /* Iterate over sensor devices. */
         mib[2] = i;
 
         /* Determine the name of the sensor device (chip). */
@@ -70,10 +90,12 @@ walk_hwsensors(FILE *fp) {
             perror("sysctl(2) failed to provide sensor device data");
             return -1;
         }
-        for (int j = 0; j < SENSOR_MAX_TYPES; j++) {
+        for (j = 0; j < SENSOR_MAX_TYPES; j++) {
+            /* Iterate over sensor types. */
             mib[3] = j;
 
-            for (int k = 0; k < snsrdev.maxnumt[j]; k++) {
+            for (k = 0; k < snsrdev.maxnumt[j]; k++) {
+                /* Iterate over sensors. */
                 mib[4] = k;
 
                 /* Determine the name and value of the sensor. */
@@ -96,11 +118,46 @@ walk_hwsensors(FILE *fp) {
     return 0;
 }
 
+
+/*
+ * Sleep until the start of the next interval, i.e. INTERVAL seconds after the
+ * start of the current interval.
+ *
+ * Return 0 on success or -1 on failure.
+ */
+int
+sleep_interval(const struct timespec *offset)
+{
+    struct timespec now, nexttime, sleep_for, sleep_rem;
+    if (clock_gettime(CLOCK_REALTIME, &now) != 0) {
+        perror("sleep_interval(): clock_gettime(CLOCK_REALTIME, ..) failed");
+        return -1;
+    }
+    nexttime.tv_sec = roundmod(now.tv_sec + INTERVAL, INTERVAL) + offset->tv_sec;
+    nexttime.tv_nsec = offset->tv_nsec;
+    assert(timedelta(&sleep_for, &now, &nexttime) == 0);
+
+    while(1) {
+        if (nanosleep(&sleep_for, &sleep_rem) == 0)
+            break;
+
+        if (errno != EINTR) {
+            perror("nanosleep(2)");
+            return -1;
+        }
+
+        sleep_for.tv_sec = sleep_rem.tv_sec;
+        sleep_for.tv_nsec = sleep_rem.tv_nsec;
+    }
+
+    return 0;
+}
+
+
 int
 main(void)
 {
-    struct timespec offset, now, nexttime, sleep_for, sleep_rem;
-    int sleep_res;
+    struct timespec offset;
 
     char tmppath[PATHBUFLEN];
     int tmpfd;
@@ -111,7 +168,7 @@ main(void)
      * update INTERVAL seconds apart, regardless of the time we started.
      */
     if (clock_gettime(CLOCK_REALTIME, &offset) != 0) {
-        perror("clock_gettime(CLOCK_REALTIME, ..) failed (pre-loop)");
+        perror("main(): clock_gettime(CLOCK_REALTIME, ..) failed");
         exit(EXIT_FAILURE);
     }
     offset.tv_sec %= INTERVAL;
@@ -149,30 +206,10 @@ main(void)
         }
 
         /* Sleep until the start of the next interval. */
-        if (clock_gettime(CLOCK_REALTIME, &now) != 0) {
-            perror("clock_gettime(CLOCK_REALTIME, ..) failed (in loop)");
+        if (sleep_interval(&offset) != 0)
             exit(EXIT_FAILURE);
-        }
-        nexttime.tv_sec = roundmod(now.tv_sec + INTERVAL, INTERVAL) + offset.tv_sec;
-        nexttime.tv_nsec = offset.tv_nsec;
-        assert(timedelta(&sleep_for, &now, &nexttime) == 0);
-
-        while(1) {
-            sleep_res = nanosleep(&sleep_for, &sleep_rem);
-
-            if (sleep_res == 0)
-                break;
-
-            if (errno != EINTR) {
-                perror("nanosleep(2)");
-                exit(EXIT_FAILURE);
-            }
-
-            sleep_for.tv_sec = sleep_rem.tv_sec;
-            sleep_for.tv_nsec = sleep_rem.tv_nsec;
-        }
     }
 
-    printf("ok\n");
-    exit(EXIT_SUCCESS);
+    /* We should never get here. */
+    assert(0);
 }
